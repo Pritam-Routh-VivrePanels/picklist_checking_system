@@ -115,10 +115,7 @@ func PostToCreator(updateData map[string]interface{}, itemID string) {
 	for moreRecords {
 		pageCount++
 
-		// Extract the nested "data" and "skip_workflow" from updateData payload
-		// updateData structure: { "data": {...fields...}, "skip_workflow": [...] }
 		var stockData map[string]interface{}
-		var skipWorkflow []string
 
 		if dataMap, ok := updateData["data"].(map[string]interface{}); ok {
 			stockData = dataMap
@@ -127,15 +124,10 @@ func PostToCreator(updateData map[string]interface{}, itemID string) {
 			return
 		}
 
-		if skipWf, ok := updateData["skip_workflow"].([]string); ok {
-			skipWorkflow = skipWf
-		}
-
 		// Build request payload with criteria for bulk update (process_until_limit is now a query parameter)
 		requestPayload := map[string]interface{}{
-			"criteria":      criteria,
-			"data":          stockData,
-			"skip_workflow": skipWorkflow,
+			"criteria": criteria,
+			"data":     stockData,
 		}
 
 		jsonData, err := json.Marshal(requestPayload)

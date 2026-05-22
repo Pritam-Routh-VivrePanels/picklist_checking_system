@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type TokenJson struct {
 	Access_token  string `json:"access_token"`
 	Refresh_token string `json:"refresh_token"`
@@ -14,6 +16,19 @@ type RefresToken struct {
 	Expires_in   int    `json:"expires_in"`
 }
 
+type SalesOrder struct {
+	SalesorderID          string
+	ItemID                string
+	ItemName              string
+	Quantity              float64
+	Rate                  float64
+	ItemSubTotalFormatted string
+	Unit                  string
+	CreatorOpsID          string
+	ReceivedAT            time.Time
+	UpdateAT              time.Time
+}
+
 type CreatorSubformRow struct {
 	ID                  string  `json:"ID,omitempty"`
 	ProductUniqueCode   string  `json:"Product_Unique_Code"`
@@ -26,10 +41,14 @@ type CreatorSubformRow struct {
 
 type CreatorPayload struct {
 	Data struct {
-		SubForm []CreatorSubformRow `json:"SubForm_Link_Name"`
+		Picklist []CreatorSubformRow `json:"Picklist"`
 	} `json:"data"`
 
 	Result struct {
-		Message bool `json:"message"`
+		Message bool     `json:"message"`
+		Fields  []string `json:"fields,omitempty"`
 	} `json:"result"`
+
+	// SkipWorkflow instructs Creator to skip named workflows when updating.
+	SkipWorkflow []string `json:"skip_workflow,omitempty"`
 }
