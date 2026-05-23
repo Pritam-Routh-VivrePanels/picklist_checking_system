@@ -45,6 +45,22 @@ func UpsertSalesOrderLine(entry models.SalesOrder) error {
 	return err
 }
 
+func SalesOrderExists(salesOrderID string) (bool, error) {
+	var exists int
+	err := db.QueryRow(
+		`SELECT 1 FROM dbo.Sales_Order WHERE salesorder_id = @p1`,
+		salesOrderID,
+	).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		log.Println("SalesOrderExists error:", err)
+		return false, err
+	}
+	return true, nil
+}
+
 func GetSubformMappings(salesOrderID string) (map[string]string, error) {
 	query := `
 	SELECT zoho_item_id, creator_subform_row_id
@@ -95,7 +111,7 @@ func UpsertSubformMapping(salesOrderID, zohoItemID, parentRecordID, subformRowID
 // SaveWebhookLog is deprecated; use UpsertSalesOrderLine.
 func SaveWebhookLog(logEntry models.SalesOrder) error {
 	if logEntry.ReceivedAT.IsZero() {
-		logEntry.ReceivedAT = time.Now().UTC()
+		logEntry.ReceivedAT = time.Now()
 	}
 	return UpsertSalesOrderLine(logEntry)
 }

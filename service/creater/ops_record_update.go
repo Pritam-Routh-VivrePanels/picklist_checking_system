@@ -30,70 +30,12 @@ func opsRecordURL(recordID string) (string, error) {
 		return "", fmt.Errorf("missing ZOHO_CLIENT_URL, ZOHO_CREATOR_APP_NAME, or ZOHO_OPS_REPORT")
 	}
 
-	// v2.1 Update/Get Record by ID uses the report link name (same record ID as the parent form).
+	// Use the form/record endpoint for updates to avoid report-specific upload rule checks.
 	url := fmt.Sprintf(
 		"%s/creator/v2.1/data/vivrepanelsprivatelimited/%s/report/%s/%s",
 		baseURL, appName, reportName, recordID,
 	)
 	return url, nil
-}
-
-func creatorRequestHeaders(extra map[string]string) map[string]string {
-	headers := make(map[string]string)
-	for k, v := range extra {
-		headers[k] = v
-	}
-	if env := os.Getenv("ZOHO_CREATOR_ENVIRONMENT"); env != "" {
-		headers["environment"] = env
-	}
-	return headers
-}
-
-type creatorAPIError struct {
-	HTTPStatus int
-	Code       int
-	Message    string
-	Body       string
-}
-
-func (e *creatorAPIError) Error() string {
-	return fmt.Sprintf("creator API error: status=%d code=%d message=%s", e.HTTPStatus, e.Code, e.Message)
-}
-
-func parseCreatorAPIError(statusCode int, respBody []byte) *creatorAPIError {
-	err := &creatorAPIError{HTTPStatus: statusCode, Body: string(respBody)}
-	var respData map[string]interface{}
-	if json.Unmarshal(respBody, &respData) != nil {
-		err.Message = string(respBody)
-		return err
-	}
-	switch c := respData["code"].(type) {
-	case float64:
-		err.Code = int(c)
-	case json.Number:
-		if n, e := c.Int64(); e == nil {
-			err.Code = int(n)
-		}
-	}
-	if msg, ok := respData["message"].(string); ok {
-		err.Message = msg
-	}
-	return err
-}
-
-func logCreatorAPIError(method string, apiErr *creatorAPIError) {
-	if apiErr == nil {
-		return
-	}
-	log.Printf("creatorHTTPRequest %s: Zoho code=%d message=%q status=%d\n", method, apiErr.Code, apiErr.Message, apiErr.HTTPStatus)
-	switch apiErr.Code {
-	case 2930:
-		log.Printf("creatorHTTPRequest: UPLOAD_RULE_NOT_CONFIGURED — configure upload rules on the parent form file-upload field in Creator, and ensure ZOHO_SCOPE includes ZohoCreator.report.UPDATE\n")
-	case 2894:
-		log.Printf("creatorHTTPRequest: report not found — verify ZOHO_OPS_REPORT matches the report link name in Creator\n")
-	case 3100:
-		log.Printf("creatorHTTPRequest: no data / record not found — verify cf_creator_ops_id and record visibility in the report\n")
-	}
 }
 
 func creatorHTTPRequest(method, url string, body []byte, extraHeaders map[string]string) (map[string]interface{}, error) {
@@ -122,7 +64,7 @@ func creatorHTTPRequest(method, url string, body []byte, extraHeaders map[string
 		if len(body) > 0 {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		for k, v := range creatorRequestHeaders(extraHeaders) {
+		for k, v := range extraHeaders {
 			req.Header.Set(k, v)
 		}
 
@@ -160,47 +102,32 @@ func creatorHTTPRequest(method, url string, body []byte, extraHeaders map[string
 	if lastErr != nil {
 		return nil, lastErr
 	}
+	if statusCode != http.StatusOK && statusCode != http.StatusNoContent {
+		return nil, fmt.Errorf("creator request failed: status=%d body=%s", statusCode, string(respBody))
+	}
 
 	var respData map[string]interface{}
 	if len(respBody) > 0 {
 		if err := json.Unmarshal(respBody, &respData); err != nil {
-			if statusCode != http.StatusOK && statusCode != http.StatusNoContent {
-				apiErr := parseCreatorAPIError(statusCode, respBody)
-				logCreatorAPIError(method, apiErr)
-				return nil, apiErr
-			}
 			return nil, fmt.Errorf("parse response: %w", err)
 		}
 	}
 
-	if statusCode != http.StatusOK && statusCode != http.StatusNoContent {
-		apiErr := parseCreatorAPIError(statusCode, respBody)
-		if apiErr.Code == 0 {
-			if code, ok := respData["code"].(float64); ok {
-				apiErr.Code = int(code)
-			}
-			if msg, ok := respData["message"].(string); ok {
-				apiErr.Message = msg
-			}
-		}
-		logCreatorAPIError(method, apiErr)
-		return respData, apiErr
-	}
-
 	if code, ok := respData["code"].(float64); ok && int(code) != 3000 {
-		apiErr := &creatorAPIError{
-			HTTPStatus: statusCode,
-			Code:       int(code),
-			Body:       string(respBody),
-		}
-		if msg, ok := respData["message"].(string); ok {
-			apiErr.Message = msg
-		}
-		logCreatorAPIError(method, apiErr)
-		return respData, apiErr
+		msg, _ := respData["message"].(string)
+		return respData, fmt.Errorf("creator API error code=%d message=%s", int(code), msg)
 	}
 
 	return respData, nil
+}
+
+// ClearOpsPicklist removes all Picklist subform rows on an ops record.
+func ClearOpsPicklist(recordID string) error {
+	var payload models.CreatorPayload
+	payload.Result.Message = true
+	payload.Result.Fields = []string{opsSubformField}
+	payload.Data.Picklist = []models.CreatorSubformRow{}
+	return UpdateOpsRecord(recordID, payload)
 }
 
 // UpdateOpsRecord updates a Zoho Creator ops record by ID (v2.1 Update Record by ID).
@@ -266,8 +193,11 @@ func HasPicklistData(resp map[string]interface{}) bool {
 
 // PicklistRow is a parsed subform row from a Creator GET response.
 type PicklistRow struct {
-	ID                string
-	ProductUniqueCode string
+	ID                  string
+	ProductUniqueCode   string
+	TransferredQuantity float64
+	Amount              float64
+	Rate                float64
 }
 
 // ExtractPicklistRows parses Picklist subform rows from a Get Record response.
@@ -300,8 +230,11 @@ func ExtractPicklistRows(resp map[string]interface{}) []PicklistRow {
 			productCode = picklistProductCodeFromRow(row)
 		}
 		rows = append(rows, PicklistRow{
-			ID:                id,
-			ProductUniqueCode: productCode,
+			ID:                  id,
+			ProductUniqueCode:   productCode,
+			TransferredQuantity: numericField(row["Transferred_Quantity"]),
+			Amount:              numericField(row["Amount"]),
+			Rate:                numericField(row["Rate"]),
 		})
 	}
 	return rows
@@ -343,6 +276,22 @@ func picklistProductCodeFromRow(row map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func numericField(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case json.Number:
+		f, _ := t.Float64()
+		return f
+	case string:
+		var f float64
+		fmt.Sscanf(t, "%f", &f)
+		return f
+	default:
+		return 0
+	}
 }
 
 func fieldToString(v interface{}) string {

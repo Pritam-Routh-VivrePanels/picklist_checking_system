@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"log"
+	"math"
 	"time"
 
 	database "picklist_checking_system/db"
@@ -33,7 +34,12 @@ func HandleWebhook(payload map[string]interface{}) {
 		return
 	}
 
-	now := time.Now().UTC()
+	salesOrderExists, err := database.SalesOrderExists(salesOrderID)
+	if err != nil {
+		log.Printf("Failed to check if sales order %s exists: %v\n", salesOrderID, err)
+	}
+
+	now := time.Now()
 	for i, itemRaw := range lineItemsRaw {
 		item, ok := itemRaw.(map[string]interface{})
 		if !ok {
@@ -64,27 +70,28 @@ func HandleWebhook(payload map[string]interface{}) {
 		return
 	}
 
+	if salesOrderExists {
+		updateExistingCreatorRecord(salesorder, salesOrderID, creatorOpsID)
+		return
+	}
+
+	updateNewCreatorRecord(salesorder, salesOrderID, creatorOpsID)
+}
+
+func updateNewCreatorRecord(salesorder map[string]interface{}, salesOrderID, creatorOpsID string) {
 	mappings, err := database.GetSubformMappings(salesOrderID)
 	if err != nil {
 		log.Printf("Failed to load subform mappings for %s: %v\n", salesOrderID, err)
 		mappings = make(map[string]string)
 	}
 
-	fetched, err := creator_sync.GetOpsRecord(creatorOpsID)
-	if err != nil {
-		log.Printf("Creator fetch before update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
-		return
-	}
-
-	existingPicklist := creator_sync.ExtractPicklistRows(fetched)
-	creatorPayload := BuildCreatorPayload(salesorder, mappings, existingPicklist)
-
+	creatorPayload := BuildCreatorPayload(salesorder, mappings, nil, false)
 	if err := creator_sync.UpdateOpsRecord(creatorOpsID, creatorPayload); err != nil {
 		log.Printf("Creator update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
 		return
 	}
 
-	fetched, err = creator_sync.GetOpsRecord(creatorOpsID)
+	fetched, err := creator_sync.GetOpsRecord(creatorOpsID)
 	if err != nil {
 		log.Printf("Creator fetch after update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
 		return
@@ -101,13 +108,116 @@ func HandleWebhook(payload map[string]interface{}) {
 	}
 }
 
-// BuildCreatorPayload merges Books line items with existing Creator Picklist rows.
-// Resolution per line: DB mapping by item_id → product code match on GET rows → new row (no ID).
-// Picklist rows present in Creator but not in the sales order are preserved (ID-only stubs).
+func updateExistingCreatorRecord(salesorder map[string]interface{}, salesOrderID, creatorOpsID string) {
+	fetched, err := creator_sync.GetOpsRecord(creatorOpsID)
+	if err != nil {
+		log.Printf("Creator GET before update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
+		return
+	}
+
+	picklistRows := creator_sync.ExtractPicklistRows(fetched)
+
+	mappings, err := database.GetSubformMappings(salesOrderID)
+	if err != nil {
+		log.Printf("Failed to load subform mappings for %s: %v\n", salesOrderID, err)
+		mappings = make(map[string]string)
+	}
+
+	preservedByItemID := preservedPicklistByItem(salesorder, mappings, picklistRows)
+
+	if err := creator_sync.ClearOpsPicklist(creatorOpsID); err != nil {
+		log.Printf("Creator clear Picklist failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
+		return
+	}
+
+	creatorPayload := BuildCreatorPayload(salesorder, nil, preservedByItemID, true)
+	if err := creator_sync.UpdateOpsRecord(creatorOpsID, creatorPayload); err != nil {
+		log.Printf("Creator update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
+		return
+	}
+
+	fetched, err = creator_sync.GetOpsRecord(creatorOpsID)
+	if err != nil {
+		log.Printf("Creator fetch after update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
+		return
+	}
+
+	picklistRows = creator_sync.ExtractPicklistRows(fetched)
+	if len(picklistRows) == 0 {
+		log.Printf("Creator GET returned no Picklist rows for sales order %s record %s\n", salesOrderID, creatorOpsID)
+		return
+	}
+
+	if err := persistSubformMappings(picklistRows, salesorder, salesOrderID, creatorOpsID); err != nil {
+		log.Printf("Failed to persist subform mappings for %s: %v\n", salesOrderID, err)
+	}
+}
+
+type preservedPicklistValues struct {
+	TransferredQuantity float64
+	Amount              float64
+	Rate                float64
+}
+
+func preservedPicklistByItem(
+	salesorder map[string]interface{},
+	mappings map[string]string,
+	picklistRows []creator_sync.PicklistRow,
+) map[string]preservedPicklistValues {
+	picklistByID := make(map[string]creator_sync.PicklistRow, len(picklistRows))
+	for _, row := range picklistRows {
+		picklistByID[row.ID] = row
+	}
+
+	usedIDs := make(map[string]bool)
+	result := make(map[string]preservedPicklistValues)
+
+	lineItemsRaw, ok := salesorder["line_items"].([]interface{})
+	if !ok {
+		return result
+	}
+
+	for _, itemRaw := range lineItemsRaw {
+		item, ok := itemRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemID := stringVal(item["item_id"])
+		name := stringVal(item["name"])
+
+		subformID := ""
+		if mappedID, exists := mappings[itemID]; exists {
+			subformID = mappedID
+		}
+		if subformID == "" {
+			subformID = matchSubformIDByProductCode(picklistRows, name, usedIDs)
+		}
+		if subformID == "" {
+			continue
+		}
+		usedIDs[subformID] = true
+
+		row, ok := picklistByID[subformID]
+		if !ok {
+			continue
+		}
+
+		result[itemID] = preservedPicklistValues{
+			TransferredQuantity: row.TransferredQuantity,
+			Amount:              row.Amount,
+			Rate:                row.Rate,
+		}
+	}
+
+	return result
+}
+
 func BuildCreatorPayload(
 	salesorder map[string]interface{},
 	existingMappings map[string]string,
-	existingPicklist []creator_sync.PicklistRow,
+	preservedByItemID map[string]preservedPicklistValues,
+	omitSubformIDs bool,
 ) models.CreatorPayload {
 	var payload models.CreatorPayload
 	payload.Result.Message = true
@@ -118,8 +228,6 @@ func BuildCreatorPayload(
 		return payload
 	}
 
-	usedSubformIDs := make(map[string]bool)
-
 	for _, itemRaw := range lineItemsRaw {
 		item, ok := itemRaw.(map[string]interface{})
 		if !ok {
@@ -128,10 +236,21 @@ func BuildCreatorPayload(
 
 		itemID := stringVal(item["item_id"])
 		name := stringVal(item["name"])
-		qty := floatVal(item["quantity"])
-		rate := floatVal(item["rate"])
+		qty := roundQty(floatVal(item["quantity"]))
+		rate := roundCurrency(floatVal(item["rate"]))
 		unit := stringVal(item["unit"])
-		amount := qty * rate
+		amount := lineItemAmount(item, qty, rate)
+		transferred := qty
+
+		if preservedByItemID != nil {
+			if p, ok := preservedByItemID[itemID]; ok {
+				transferred = roundQty(p.TransferredQuantity)
+				amount = roundCurrency(p.Amount)
+				if p.Rate != 0 {
+					rate = roundCurrency(p.Rate)
+				}
+			}
+		}
 
 		row := models.CreatorSubformRow{
 			ProductUniqueCode:   name,
@@ -139,38 +258,19 @@ func BuildCreatorPayload(
 			Rate:                rate,
 			Amount:              amount,
 			Qty:                 qty,
-			TransferredQuantity: qty,
+			TransferredQuantity: transferred,
 		}
 
-		subformID := resolveSubformID(itemID, name, existingMappings, existingPicklist, usedSubformIDs)
-		if subformID != "" {
-			row.ID = subformID
-			usedSubformIDs[subformID] = true
+		if !omitSubformIDs && existingMappings != nil {
+			if creatorSubformID, exists := existingMappings[itemID]; exists {
+				row.ID = creatorSubformID
+			}
 		}
 
 		payload.Data.Picklist = append(payload.Data.Picklist, row)
 	}
 
-	for _, existing := range existingPicklist {
-		if existing.ID == "" || usedSubformIDs[existing.ID] {
-			continue
-		}
-		payload.Data.Picklist = append(payload.Data.Picklist, models.CreatorSubformRow{ID: existing.ID})
-	}
-
 	return payload
-}
-
-func resolveSubformID(
-	itemID, productName string,
-	existingMappings map[string]string,
-	existingPicklist []creator_sync.PicklistRow,
-	usedIDs map[string]bool,
-) string {
-	if id := existingMappings[itemID]; id != "" && !usedIDs[id] {
-		return id
-	}
-	return matchSubformIDByProductCode(existingPicklist, productName, usedIDs)
 }
 
 func persistSubformMappings(
@@ -181,8 +281,14 @@ func persistSubformMappings(
 	lineItems := lineItemsWithIDs(salesorder)
 	usedIDs := make(map[string]bool)
 
-	for _, li := range lineItems {
-		subformID := matchSubformIDByProductCode(picklistRows, li.name, usedIDs)
+	for i, li := range lineItems {
+		subformID := ""
+		if i < len(picklistRows) && picklistRows[i].ID != "" && !usedIDs[picklistRows[i].ID] {
+			subformID = picklistRows[i].ID
+		}
+		if subformID == "" {
+			subformID = matchSubformIDByProductCode(picklistRows, li.name, usedIDs)
+		}
 		if subformID == "" {
 			log.Printf("No subform row ID returned for item %s (%s); picklist rows=%d\n",
 				li.itemID, li.name, len(picklistRows))
@@ -230,12 +336,37 @@ func matchSubformIDByProductCode(rows []creator_sync.PicklistRow, productName st
 	return ""
 }
 
+func lineItemAmount(item map[string]interface{}, qty, rate float64) float64 {
+	for _, key := range []string{"item_total", "line_item_total", "item_sub_total"} {
+		if v := floatVal(item[key]); v != 0 {
+			return roundCurrency(v)
+		}
+	}
+	return roundCurrency(qty * rate)
+}
+
+func roundCurrency(f float64) float64 {
+	return math.Round(f*100) / 100
+}
+
+func roundQty(f float64) float64 {
+	return math.Round(f*10000) / 10000
+}
+
 func stringVal(v interface{}) string {
 	s, _ := v.(string)
 	return s
 }
 
 func floatVal(v interface{}) float64 {
-	f, _ := v.(float64)
-	return f
+	switch t := v.(type) {
+	case float64:
+		return t
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	default:
+		return 0
+	}
 }
