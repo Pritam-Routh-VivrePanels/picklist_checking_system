@@ -85,6 +85,11 @@ func updateNewCreatorRecord(salesorder map[string]interface{}, salesOrderID, cre
 		mappings = make(map[string]string)
 	}
 
+	if err := creator_sync.ClearOpsPicklist(creatorOpsID); err != nil {
+		log.Printf("Creator clear Picklist failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
+		return
+	}
+
 	creatorPayload := BuildCreatorPayload(salesorder, mappings, nil, false)
 	if err := creator_sync.UpdateOpsRecord(creatorOpsID, creatorPayload); err != nil {
 		log.Printf("Creator update failed for sales order %s record %s: %v\n", salesOrderID, creatorOpsID, err)
