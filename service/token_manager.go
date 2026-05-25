@@ -57,12 +57,12 @@ func AutoRefres() {
 			var token models.TokenJson
 			json.Unmarshal(json_data, &token)
 
-			expiryTime := token.Created_At + int64(token.Expires_in)
+			expiryTime := token.Created_At.Add(time.Duration(token.Expires_in) * time.Second)
 
 			// refres 5 min before expirey
-			refreshTime := expiryTime - 300
+			refreshTime := expiryTime.Add(-5 * time.Minute)
 
-			sleepDuration := time.Until(time.Unix(refreshTime, 0))
+			sleepDuration := time.Until(refreshTime)
 
 			if sleepDuration <= 0 {
 				sleepDuration = 10 * time.Second
@@ -124,7 +124,7 @@ func GenrateToken(Code string) int {
 		log.Fatalf("token exchange JSON parse failed: %v response=%s", err, string(bodyBytes))
 	}
 
-	data.Created_At = time.Now().Unix()
+	data.Created_At = time.Now()
 
 	file, _ := json.MarshalIndent(data, "", "    ")
 	_ = os.WriteFile(token_json_path, file, 0644)
@@ -197,7 +197,7 @@ func RefresToken() int {
 	// ✅ Update ALL required fields
 	token_json.Access_token = data.Access_token
 	token_json.Expires_in = data.Expires_in
-	token_json.Created_At = time.Now().Unix()
+	token_json.Created_At = time.Now()
 
 	update_json, err := json.MarshalIndent(token_json, "", "    ")
 	if err != nil {
@@ -212,10 +212,10 @@ func RefresToken() int {
 }
 
 func IsTokenExpired(token models.TokenJson) bool {
-	expiryTime := token.Created_At + int64(token.Expires_in)
+	expiryTime := token.Created_At.Add(time.Duration(token.Expires_in) * time.Second)
 
 	// Refresh 5 minutes before expiry
-	buffer := int64(300)
+	buffer := 5 * time.Minute
 
-	return time.Now().Unix() > (expiryTime - buffer)
+	return time.Now().After(expiryTime.Add(-buffer))
 }

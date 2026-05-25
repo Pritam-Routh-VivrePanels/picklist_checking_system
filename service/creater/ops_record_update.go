@@ -140,9 +140,6 @@ func UpdateOpsRecord(recordID string, payload models.CreatorPayload) error {
 	if payload.Result.Fields == nil {
 		payload.Result.Fields = []string{opsSubformField}
 	}
-	if payload.SkipWorkflow == nil {
-		payload.SkipWorkflow = []string{"form_workflow"}
-	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
