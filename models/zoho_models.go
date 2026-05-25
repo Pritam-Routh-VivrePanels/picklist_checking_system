@@ -3,10 +3,10 @@ package models
 import "time"
 
 type TokenJson struct {
-	Access_token  string `json:"access_token"`
-	Refresh_token string `json:"refresh_token"`
-	Expires_in    int    `json:"expires_in"`
-	Created_At    int64  `json:"Created_At"`
+	Access_token  string    `json:"access_token"`
+	Refresh_token string    `json:"refresh_token"`
+	Expires_in    int       `json:"expires_in"`
+	Created_At    time.Time `json:"Created_At"`
 }
 
 type RefresToken struct {
@@ -48,7 +48,4 @@ type CreatorPayload struct {
 		Message bool     `json:"message"`
 		Fields  []string `json:"fields,omitempty"`
 	} `json:"result"`
-
-	// SkipWorkflow instructs Creator to skip named workflows when updating.
-	SkipWorkflow []string `json:"skip_workflow,omitempty"`
 }
