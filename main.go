@@ -9,6 +9,7 @@ import (
 	database "picklist_checking_system/db"
 	"picklist_checking_system/handler"
 	"picklist_checking_system/service"
+	"picklist_checking_system/service/queue"
 )
 
 func main() {
@@ -23,6 +24,9 @@ func main() {
 
 	// Building new database Connection
 	database.DbConnection()
+
+	queue.Init()
+	queue.StartWorkers(queue.WorkerCount())
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

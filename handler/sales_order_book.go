@@ -2,8 +2,10 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
-	service "picklist_checking_system/service/webhook"
+
+	"picklist_checking_system/service/queue"
 )
 
 func BookWebhook(w http.ResponseWriter, r *http.Request) {
@@ -22,14 +24,16 @@ func BookWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// fmt.Println("Received:", booksPayload)
-	service.HandleWebhook(booksPayload)
+	if err := queue.Enqueue(booksPayload); err != nil {
+		log.Printf("Failed to enqueue webhook: %v", err)
+		http.Error(w, "Failed to queue webhook", http.StatusServiceUnavailable)
+		return
+	}
 
-	// ---- Response ----
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":  "Webhook Post Successful",
-		"response": 200,
+		"message":  "Webhook accepted and queued",
+		"response": 202,
 	})
 	
 	if err != nil {
